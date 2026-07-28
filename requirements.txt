@@ -1,0 +1,10 @@
+# Ядро стенда. numpy нужен только для анализа, scipy не требуется.
+numpy>=1.24
+
+# Для работы с настоящей моделью (scripts/smoke_gpu.py, run_e1.py).
+# Тесты в tests/ и модуль metrics их НЕ требуют — гоняются на чистом Python.
+#
+# Ставить torch надо с индексом под вашу CUDA, иначе приедет сборка без GPU:
+#   pip install torch --index-url https://download.pytorch.org/whl/cu124
+torch>=2.2
+transformers>=4.44
