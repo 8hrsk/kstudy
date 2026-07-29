@@ -23,7 +23,9 @@ from pathlib import Path
 from kstudy._compat import enable_utf8_console
 from kstudy.corpus import load_subsystem, save_chunks
 from kstudy.metrics import (
+    MIN_EXAM_HEADROOM,
     calibrate_thresholds,
+    chunk_is_measurable,
     exam_baseline,
     score_chunk,
     score_note,
@@ -44,6 +46,12 @@ from kstudy.scoring import HFScorer
 
 
 def main() -> int:
+    # Строго до ArgumentParser: argparse печатает справку и свои ошибки прямо
+    # из parse_args(), а в них есть кириллица. На неперенастроенном stdout
+    # (cp1251/cp1252, и всегда при перенаправлении вывода) это падает с
+    # UnicodeEncodeError ещё до первой строки полезной работы.
+    enable_utf8_console()
+
     ap = argparse.ArgumentParser()
     ap.add_argument("--kernel", required=True, help="путь к дереву ядра")
     ap.add_argument("--subsystem", default="rcu")
@@ -51,7 +59,11 @@ def main() -> int:
     ap.add_argument("--device", default="cuda")
     ap.add_argument("--dtype", default="bfloat16")
     ap.add_argument("--n-chunks", type=int, default=40)
-    ap.add_argument("--n-questions", type=int, default=4)
+    # Шестнадцать, а не четыре. При четырёх база экзамена оказывается сравнима
+    # со стоимостью заметки (замер: 590.4 против 571.7 бита), потолок выигрыша
+    # +18.7 бита, и метрика меряет соотношение размеров вместо понимания.
+    # См. MIN_EXAM_HEADROOM и docs/e1-debug-A-C.md.
+    ap.add_argument("--n-questions", type=int, default=16)
     ap.add_argument("--min-chars", type=int, default=400)
     ap.add_argument("--max-chars", type=int, default=4000)
     ap.add_argument("--lam", type=float, default=1.0)
@@ -59,7 +71,6 @@ def main() -> int:
     ap.add_argument("--seed", type=int, default=0)
     a = ap.parse_args()
 
-    enable_utf8_console()
     out = Path(a.outdir)
     out.mkdir(parents=True, exist_ok=True)
     rng = random.Random(a.seed)
@@ -156,13 +167,37 @@ def main() -> int:
     baselines: dict[str, tuple[float, int]] = {}
     chunk_scores: dict[str, object] = {}
 
+    # Гейт пригодности. Считается ОДИН РАЗ на чанк и по МОДЕЛЬНОЙ заметке:
+    # контроли (копия) заведомо дороже, и мерить по ним значило бы выбрасывать
+    # чанк за то, что копия длинная. Если потолок сравним с ценой заметки,
+    # выбрасывается весь чанк со всеми контролями — иначе в выборку попадают
+    # строки, где отрицательный выигрыш означает лишь короткий экзамен.
+    model_note = {n.chunk_id: n.text for n in all_notes if n.kind == "model"}
+    unmeasurable: set[str] = set()
+    for cid, exam in exams.items():
+        if cid not in baselines:
+            baselines[cid] = exam_baseline(scorer, exam)
+        note_text = model_note.get(cid)
+        if note_text is None:
+            continue
+        l_note = scorer.score(note_text).bits
+        if not chunk_is_measurable(baselines[cid][0], l_note):
+            unmeasurable.add(cid)
+
+    if unmeasurable:
+        print(f"      ⚠ {len(unmeasurable)} чанков непригодны: headroom < "
+              f"{MIN_EXAM_HEADROOM} (экзамен слишком дёшев относительно заметки)")
+
     for j, nr in enumerate(all_notes, 1):
         exam = exams.get(nr.chunk_id)
         chunk = by_id.get(nr.chunk_id)
         if not exam or not chunk:
             continue
+        if nr.chunk_id in unmeasurable:
+            continue
         if nr.chunk_id not in baselines:
             baselines[nr.chunk_id] = exam_baseline(scorer, exam)
+        if nr.chunk_id not in chunk_scores:
             chunk_scores[nr.chunk_id] = scorer.score(chunk.text)
 
         tm = score_note_on_exam(

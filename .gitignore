@@ -1,2 +1,10 @@
 __pycache__
 .DS_Store
+
+# Корпус, который забирает scripts/fetch_corpus.py — качается, не хранится.
+/linux/
+
+# Выход run_e1.py / rate.py: chunks.jsonl, notes.jsonl, metrics.jsonl, ratings.jsonl
+# data_v1 — прогон на экзамене-на-извлечение, оставлен для сравнения
+/data/
+/data_v*/

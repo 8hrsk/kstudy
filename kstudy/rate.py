@@ -41,6 +41,10 @@ def load_jsonl(path: str | Path) -> list[dict]:
 
 
 def main() -> int:
+    # До ArgumentParser: справка и ошибки argparse печатаются внутри
+    # parse_args(), до этой строки консоль ещё в кодировке локали.
+    enable_utf8_console()
+
     ap = argparse.ArgumentParser()
     ap.add_argument("notes_jsonl")
     ap.add_argument("chunks_jsonl")
@@ -49,7 +53,6 @@ def main() -> int:
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--max-chunk-chars", type=int, default=1800)
     a = ap.parse_args()
-    enable_utf8_console()
 
     notes = load_jsonl(a.notes_jsonl)
     chunks = {c["chunk_id"]: c for c in load_jsonl(a.chunks_jsonl)}

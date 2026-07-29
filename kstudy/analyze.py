@@ -214,11 +214,14 @@ def print_report(rows: Sequence[dict], rating_key: str = "rating") -> bool:
 def main() -> int:
     import argparse
 
+    # До ArgumentParser: справка и ошибки argparse содержат кириллицу и
+    # печатаются ещё внутри parse_args().
+    enable_utf8_console()
+
     ap = argparse.ArgumentParser()
     ap.add_argument("metrics_jsonl", help="выход run_e1.py")
     ap.add_argument("--ratings", help="выход kstudy/rate.py")
     a = ap.parse_args()
-    enable_utf8_console()
 
     rows = [json.loads(l) for l in Path(a.metrics_jsonl).read_text(encoding="utf-8").splitlines() if l.strip()]
     if a.ratings:

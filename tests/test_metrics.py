@@ -26,9 +26,12 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from kstudy.scoring import CacheNgramScorer  # noqa: E402
 from kstudy.metrics import (  # noqa: E402
+    MIN_EXAM_HEADROOM,
     QA,
     calibrate_thresholds,
+    chunk_is_measurable,
     exam_baseline,
+    exam_headroom,
     score_chunk,
     score_note,
     score_note_on_exam,
@@ -332,6 +335,119 @@ def test_token_counts_stable_across_contexts():
     a = s.score(CHUNK, context="")
     b = s.score(CHUNK, context=NOTES["good"])
     assert a.n_tokens == b.n_tokens
+
+
+# ==========================================================================
+# D. Пригодность экзамена — третья находка стенда
+#
+# Первый прогон smoke_gpu.py на Qwen3-1.7B провалил проверку C, и причина
+# оказалась не в качестве заметки, а в соотношении размеров: база экзамена
+# 590.4 бита против стоимости заметки 571.7. Потолок выигрыша +18.7 бита,
+# то есть C не могла пройти НИ ПРИ КАКОМ качестве заметки.
+#
+# Записываем это тестами, чтобы не потерялось: разбор в docs/e1-debug-A-C.md.
+# ==========================================================================
+
+
+def test_low_headroom_makes_positive_gain_impossible():
+    """
+    Ядро находки H1. Если база экзамена не превышает стоимость заметки,
+    выигрыш отрицателен даже при стопроцентном recall. Меряется соотношение
+    размеров, а не понимание.
+    """
+    m = _synthetic(savings=240, note_bits=260, base=240.0)
+    assert m.recall == 1.0, "recall должен быть предельным"
+    assert m.max_possible_gain_bits < 0
+    assert m.task_gain_bits < 0
+    assert not chunk_is_measurable(m.L_answers_bits, m.L_note_bits)
+
+
+def test_first_smoke_run_would_be_rejected_by_the_gate():
+    """
+    Точные числа первого прогона. Гейт обязан был отбраковать этот чанк
+    ДО оценки — тогда провал C не выглядел бы провалом метрики.
+    """
+    assert not chunk_is_measurable(590.4, 571.7)
+    assert exam_headroom(590.4, 571.7) < 1.1
+
+
+def test_headroom_gate_accepts_adequate_exam():
+    """Экзамен втрое дороже заметки — измерять можно."""
+    assert chunk_is_measurable(2000.0, 600.0)
+    assert exam_headroom(2000.0, 600.0) >= MIN_EXAM_HEADROOM
+
+
+def test_max_possible_gain_is_the_ceiling():
+    """Выигрыш никогда не превышает базу минус цену заметки. Это и есть насыщение."""
+    for savings in (0, 50, 120, 200, 240):
+        m = _synthetic(savings=savings, note_bits=100, base=240.0)
+        assert m.task_gain_bits <= m.max_possible_gain_bits + 1e-9
+
+
+def test_headroom_is_independent_of_note_quality():
+    """
+    Гейт обязан зависеть только от размеров, не от того, хороша заметка или
+    нет. Иначе он превращается в скрытый отбор по результату.
+    """
+    good = _synthetic(savings=200, note_bits=100, base=400.0)
+    bad = _synthetic(savings=0, note_bits=100, base=400.0)
+    assert good.headroom == bad.headroom == 4.0
+
+
+# ==========================================================================
+# E. Разбор ответа модели
+#
+# Четвёртая находка: парсер экзамена читал строго по строке на JSON. Модель
+# выдаёт то JSONL, то тот же JSON с отступами — и во втором случае экзамен
+# выходил пустым, чанк отсеивался «за каприз модели». Терялась примерно
+# половина чанков, молча. Дефект данных, а не метрики, но на измерения он
+# влияет сильнее многих метрических.
+# ==========================================================================
+
+
+def test_exam_parser_reads_jsonl():
+    from kstudy.notes import parse_exam
+
+    raw = '{"q": "A?", "a": "one"}\n{"q": "B?", "a": "two"}'
+    assert len(parse_exam(raw, 16)) == 2
+
+
+def test_exam_parser_reads_pretty_printed():
+    """Ровно то, на чём терялись чанки."""
+    from kstudy.notes import parse_exam
+
+    raw = '{\n  "q": "A?",\n  "a": "one"\n}\n\n{\n  "q": "B?",\n  "a": "two"\n}'
+    got = parse_exam(raw, 16)
+    assert len(got) == 2, got
+    assert got[0].question == "A?"
+
+
+def test_exam_parser_survives_braces_inside_strings():
+    """Вопрос про код со скобками не должен рвать разбор."""
+    from kstudy.notes import parse_exam
+
+    raw = '{"q": "What does {} mean?", "a": "An empty initialiser {0}."}'
+    got = parse_exam(raw, 16)
+    assert len(got) == 1, got
+    assert got[0].answer == "An empty initialiser {0}."
+
+
+def test_exam_parser_respects_limit():
+    from kstudy.notes import parse_exam
+
+    raw = "\n".join('{"q": "q%d", "a": "a%d"}' % (i, i) for i in range(30))
+    assert len(parse_exam(raw, 16)) == 16
+
+
+def test_truncated_thinking_yields_nothing():
+    """
+    Оборванный <think> без закрывающего тега — это не заметка, а размышления
+    модели вслух. Пустая строка честнее: вызывающий код пропустит чанк.
+    """
+    from kstudy.notes import strip_thinking
+
+    assert strip_thinking("<think>I should start by") == ""
+    assert strip_thinking("<think>reasoning</think>Note text") == "Note text"
 
 
 if __name__ == "__main__":

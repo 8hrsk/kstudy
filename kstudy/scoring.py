@@ -95,8 +95,23 @@ class HFScorer(Scorer):
 
     @property
     def _bos(self) -> list[int]:
-        bos = self.tokenizer.bos_token_id
-        return [bos] if bos is not None else []
+        """
+        Токен-затравка. Обязан быть непустым, иначе первый токен target нечем
+        предсказывать: спан начинается с позиции 0, индекс logits становится -1
+        и Python молча заворачивает его на ПОСЛЕДНЮЮ позицию. Числа при этом
+        выглядят правдоподобно — ровно тот способ незаметно испортить замер,
+        о котором предупреждает докстринг класса.
+
+        У части моделей (Qwen3 в их числе) bos_token_id нет вовсе. Тогда за
+        начало документа сходит eos: он и обучался как разделитель документов.
+        """
+        for tok in (self.tokenizer.bos_token_id, self.tokenizer.eos_token_id):
+            if tok is not None:
+                return [tok]
+        raise ValueError(
+            f"у токенизатора {self.tokenizer.name_or_path} нет ни bos, ни eos — "
+            "нечем задать начало документа, замеры были бы несравнимы"
+        )
 
     def score(self, target: str, context: str = "") -> Score:
         return self.score_many([(target, context)], batch_size=1)[0]
@@ -158,6 +173,12 @@ class HFScorer(Scorer):
             results = []
             for row, (s, e) in enumerate(spans):
                 # logits[s-1 : e-1] предсказывают токены [s : e]
+                if s < 1:
+                    raise AssertionError(
+                        f"спан target начинается с {s}: перед ним нет позиции, "
+                        "по которой его предсказывать (индекс -1 завернулся бы "
+                        "на конец последовательности)"
+                    )
                 idx = torch.arange(s, e, device=self.device)
                 tok_lp = logprobs[row, idx - 1, :].gather(
                     1, ids_t[row, idx].unsqueeze(1)

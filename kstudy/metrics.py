@@ -327,6 +327,23 @@ class TaskNoteMetrics:
         )
 
     @property
+    def headroom(self) -> float:
+        """
+        Во сколько раз потолок экономии превышает цену заметки. См.
+        MIN_EXAM_HEADROOM: ниже 3 отрицательный выигрыш не означает ничего,
+        кроме короткого экзамена.
+        """
+        return exam_headroom(self.L_answers_bits, self.L_note_bits)
+
+    @property
+    def max_possible_gain_bits(self) -> float:
+        """
+        Выигрыш при стопроцентном recall — недостижимый потолок. Полезен
+        именно как диагностика: если он отрицателен, заметку можно не считать.
+        """
+        return self.L_answers_bits - self.lam * self.L_note_bits
+
+    @property
     def verdict(self) -> str:
         if self.savings_bits <= 0:
             return "reject"
@@ -341,6 +358,8 @@ class TaskNoteMetrics:
             task_gain_bits=self.task_gain_bits,
             recall=self.recall,
             leverage=self.leverage,
+            headroom=self.headroom,
+            max_possible_gain_bits=self.max_possible_gain_bits,
             verdict=self.verdict,
         )
         return d
@@ -405,3 +424,49 @@ def exam_baseline(
         bits += s.bits
         toks += s.n_tokens
     return bits, toks
+
+
+# --------------------------------------------------------------------------
+# Пригодность чанка к измерению (находка H1, docs/e1-debug-A-C.md)
+# --------------------------------------------------------------------------
+
+MIN_EXAM_HEADROOM = 3.0
+"""
+Во сколько раз база экзамена должна превышать стоимость заметки.
+
+Откуда взялось. Экономия ограничена сверху базой: больше, чем Σ L(A|Q), на
+ответах не сэкономишь. Значит
+
+    выигрыш = экономия - λ·L(N)  ≤  база - λ·L(N)
+
+и при базе ≈ L(N) даже стопроцентный recall даёт выигрыш около нуля. Первый
+прогон смоука поймал ровно это: база 590.4 бит против L(N) 571.7, потолок
++18.7 бита. Проверка C не могла пройти ни при каком качестве заметки — мерялся
+не смысл, а соотношение размеров.
+
+Тройка — не подобранный порог, а требование, чтобы потолок был заметно больше
+измеряемого эффекта. При headroom = 3 заметка, закрывшая половину экзамена,
+даёт выигрыш +0.5·база, то есть сигнал вдвое выше цены заметки.
+
+Это ФИЛЬТР ПРИГОДНОСТИ, а не вердикт: чанк с низким headroom не оценивается
+вовсе. Смешивать его с verdict нельзя — verdict отвечает на вопрос «хороша ли
+заметка», а здесь мы говорим «этим экзаменом вообще ничего измерить нельзя».
+"""
+
+
+def exam_headroom(base_bits: float, note_bits: float) -> float:
+    """Во сколько раз потолок экономии превышает цену заметки."""
+    return base_bits / note_bits if note_bits > 0 else float("inf")
+
+
+def chunk_is_measurable(
+    base_bits: float, note_bits: float, min_headroom: float = MIN_EXAM_HEADROOM
+) -> bool:
+    """
+    Можно ли на этом экзамене вообще что-то измерить.
+
+    Проверять ДО оценки заметки и выбрасывать чанк при False — иначе в выборку
+    попадают чанки, где отрицательный выигрыш означает лишь короткий экзамен,
+    а не плохую заметку, и корреляция с человеческой оценкой размывается шумом.
+    """
+    return exam_headroom(base_bits, note_bits) >= min_headroom
